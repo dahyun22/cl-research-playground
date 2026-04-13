@@ -5,7 +5,7 @@ Runs configurable continual learning experiments on supported datasets/models.
 
 Examples:
   python run_all.py
-  python run_all.py --dataset mnist --model mlp --methods finetune ewc
+  python run_all.py --methods gem
   python run_all.py --dataset cifar10 --model cnn --no-plot
   python run_all.py --plot-only results.pkl
 """
@@ -29,9 +29,12 @@ METHOD_DISPLAY_NAMES = {
     "derpp": "DER++",
     "hat": "HAT",
     "co2l": "Co2L",
+    "gem": "GEM",
+    "lwf": "LwF",
+    "si": "SI",
 }
 
-DEFAULT_METHODS = ["finetune", "ewc", "derpp", "hat", "co2l"]
+DEFAULT_METHODS = ["finetune", "ewc", "derpp", "hat", "co2l", "gem", "lwf", "si"]
 
 EXPERIMENT_REGISTRY = {
     "mnist": {

@@ -14,6 +14,9 @@ from methods.ewc import EWCTrainer
 from methods.derpp import DERppTrainer
 from methods.hat import HATTrainer
 from methods.co2l import Co2LTrainer
+from methods.gem import GEMTrainer
+from methods.lwf import LwFTrainer
+from methods.si import SITrainer
 from models import MNIST_MLP, CIFAR10_CNN, MLP_Co2L, CNN_Co2L
 
 # Maps standard model class → Co2L variant with backbone/proj_head split
@@ -69,7 +72,7 @@ class TaskIncrementalLearner:
         Returns:
             dict: Results containing accuracy_matrix, weight_drift, avg_accuracy, bwt
         """
-        assert method_name in ["finetune", "ewc", "derpp", "hat", "co2l"]
+        assert method_name in ["finetune", "ewc", "derpp", "hat", "co2l", "gem", "lwf", "si"]
         
         # Initialize results storage
         results = {
@@ -120,6 +123,24 @@ class TaskIncrementalLearner:
                 learning_rate=self.learning_rate, epochs=self.epochs,
                 distill_lambda=1.0, temperature=0.1
             )
+        elif method_name == "gem":
+            trainer = GEMTrainer(
+                model, device=self.device,
+                learning_rate=self.learning_rate, epochs=self.epochs,
+                n_memories=256, margin=0.0
+            )
+        elif method_name == "lwf":
+            trainer = LwFTrainer(
+                model, device=self.device,
+                learning_rate=self.learning_rate, epochs=self.epochs,
+                lwf_lambda=1.0, temperature=2.0
+            )
+        elif method_name == "si":
+            trainer = SITrainer(
+                model, device=self.device,
+                learning_rate=self.learning_rate, epochs=self.epochs,
+                si_lambda=1.0, xi=0.1
+            )
         
         # Track parameter snapshots for weight drift
         prev_params = model.get_parameters()
@@ -134,6 +155,13 @@ class TaskIncrementalLearner:
             # Get training data for this task
             train_loader = self.dataset.get_task_data(task_id, split="train")
             
+            # LwF: snapshot current model as distillation reference before
+            # training begins, so old_model reflects knowledge of tasks 0..t-1
+            if method_name == "lwf":
+                if verbose:
+                    print(f"  Recording soft labels (LwF)...")
+                trainer.record_soft_labels(train_loader)
+
             # Train on current task
             if verbose:
                 print(f"\n  Training on task {task_id} ({method_name})")
@@ -192,6 +220,18 @@ class TaskIncrementalLearner:
                 # Freeze current model snapshot as distillation reference
                 if verbose:
                     print(f"  Consolidating Co2L prev model...")
+                trainer.consolidate_task()
+
+            elif method_name == "gem":
+                # Store episodic memory for this task
+                if verbose:
+                    print(f"  Storing GEM episodic memory...")
+                trainer.consolidate_task(train_loader)
+
+            elif method_name == "si":
+                # Convert accumulated ω into importance Ω; no data pass needed
+                if verbose:
+                    print(f"  Consolidating SI importance...")
                 trainer.consolidate_task()
         
         # Compute Backward Transfer (BWT)

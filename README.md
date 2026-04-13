@@ -1,372 +1,344 @@
-# Continual Learning Experiment: Fine-tuning vs EWC vs DER++
+# Continual Learning Research Playground
 
-완전한 PyTorch 기반 연속 학습(Continual Learning) 실험으로 세 가지 방법을 비교합니다:
-- **Fine-tuning (기준)**
-- **Elastic Weight Consolidation (EWC)**
-- **Experience Replay with DER++**
+Task-Incremental Learning 환경에서 8가지 연속 학습(Continual Learning) 알고리즘을 직접 구현하고 비교하는 실험 프레임워크.
 
-## 개요
+---
 
-카타스트로픽 포게팅(Catastrophic Forgetting)을 측정하면서 모델 파라미터가 여러 작업에 걸쳐 어떻게 변하는지 시각화합니다.
+## 지원 알고리즘
+
+| 키 | 이름 | 핵심 아이디어 | 데이터 저장 | importance 계산 |
+|---|---|---|---|---|
+| `finetune` | Fine-tuning | 제약 없는 순차 학습 (baseline) | ✗ | — |
+| `ewc` | EWC | Fisher Information으로 중요 파라미터 보호 | ✗ | post-hoc (데이터 필요) |
+| `si` | SI | 학습 중 파라미터 기여도를 온라인으로 누적 | ✗ | online (데이터 불필요) |
+| `lwf` | LwF | Knowledge distillation으로 이전 task 지식 보존 | ✗ | — |
+| `derpp` | DER++ | Replay buffer + logit distillation | ✓ 버퍼 | — |
+| `gem` | GEM | Gradient projection으로 이전 task 손실 증가 차단 | ✓ 메모리 | — |
+| `hat` | HAT | Task별 binary mask로 뉴런 소유권 분리 | ✗ | — |
+| `co2l` | Co2L | Contrastive learning + asymmetric distillation | ✗ | — |
+
+---
 
 ## 프로젝트 구조
 
 ```
-cl/
-├── run_all.py                  # 진입점: 전체 실험 실행
-├── datasets.py                 # Split MNIST & Split CIFAR-10 데이터셋 클래스
-├── models.py                   # MNIST_MLP 및 CIFAR10_CNN 모델
-├── train.py                    # 메인 학습 루프 (TaskIncrementalLearner)
-├── evaluate.py                 # 평가 유틸리티
-├── visualize.py                # 결과 시각화 (matplotlib)
-├── methods/
-│   ├── __init__.py
-│   ├── finetune.py            # 기준: 단순 파인튜닝
-│   ├── ewc.py                 # EWC with Fisher Information Matrix
-│   └── derpp.py               # DER++ with Experience Replay Buffer
-├── results.pkl                # 저장된 결과 (실행 후)
-├── continual_learning_results.png # 시각화 (실행 후)
-└── README.md                  # 이 파일
+cl-research-playground/
+├── run_all.py          # 실험 진입점 (CLI)
+├── train.py            # TaskIncrementalLearner — 학습 루프 오케스트레이터
+├── models.py           # MNIST_MLP, CIFAR10_CNN, MLP_Co2L, CNN_Co2L
+├── datasets.py         # SplitMNIST, SplitCIFAR10
+├── losses.py           # SupConLoss, AsymDistillLoss (Co2L용)
+├── evaluate.py         # 평가 유틸리티
+├── visualize.py        # 결과 시각화 (matplotlib)
+└── methods/
+    ├── finetune.py     # FinetuneTrainer
+    ├── ewc.py          # EWCTrainer
+    ├── si.py           # SITrainer
+    ├── lwf.py          # LwFTrainer
+    ├── derpp.py        # DERppTrainer, ReplayBuffer
+    ├── gem.py          # GEMTrainer, EpisodicMemory
+    ├── hat.py          # HATTrainer
+    └── co2l.py         # Co2LTrainer
 ```
 
-## 데이터셋 설정
+---
 
-### Split MNIST
-- **5개 이진 작업**: (0vs1), (2vs3), (4vs5), (6vs7), (8vs9)
-- 각 작업: 2개 클래스의 이진 분류
-- 입력 크기: 784 (28×28 플래트)
+## 실험 설정
 
-### Split CIFAR-10
-- **5개 이진 작업**: 2개 클래스씩
-  - Task 0: {airplane, automobile}
-  - Task 1: {bird, cat}
-  - Task 2: {deer, dog}
-  - Task 3: {frog, horse}
-  - Task 4: {ship, truck}
-- 각 작업: 2개 클래스의 이진 분류
-- 입력 크기: 3072 (3×32×32)
+### 데이터셋
 
-## 모델 아키텍처
-
-### MNIST_MLP (소규모 MLP)
+**Split MNIST** — 5개 이진 분류 task
 ```
-Input (784)
-  ↓
-FC (256) + ReLU
-  ↓
-FC (256) + ReLU
-  ↓
-FC (2)  # 이진 출력
+Task 0: 0 vs 1
+Task 1: 2 vs 3
+Task 2: 4 vs 5
+Task 3: 6 vs 7
+Task 4: 8 vs 9
 ```
 
-### CIFAR10_CNN (소규모 CNN)
+**Split CIFAR-10** — 5개 이진 분류 task
 ```
-Input (3, 32, 32)
-  ↓
-Conv2d(3→32, 3×3) + ReLU + MaxPool
-  ↓
-Conv2d(32→64, 3×3) + ReLU + MaxPool
-  ↓
-Flatten
-  ↓
-FC (512) + ReLU
-  ↓
-FC (2)  # 이진 출력
+Task 0: airplane vs automobile
+Task 1: bird vs cat
+Task 2: deer vs dog
+Task 3: frog vs horse
+Task 4: ship vs truck
 ```
 
-## 세 가지 방법의 개념
+### 모델 아키텍처
 
-### 1. Fine-tuning (기준)
-**개념**: 각 새 작업에서 표준 SGD/Adam으로 모델을 업데이트
-- 메모리: 없음
-- 정규화: 없음
-- **예상**: 높은 카타스트로픽 포게팅
+**MNIST_MLP**
+```
+784 → FC(256) → ReLU → FC(256) → ReLU → FC(2)
+```
 
-**손실 함수**:
+**CIFAR10_CNN**
+```
+3×32×32 → Conv(32) → MaxPool → Conv(64) → MaxPool → FC(512) → ReLU → FC(2)
+```
+
+> Co2L은 backbone + projection head가 분리된 `MLP_Co2L` / `CNN_Co2L` 변형을 자동 사용.
+
+---
+
+## 알고리즘 상세
+
+### Fine-tuning (baseline)
+
+제약 없이 각 task를 순차 학습. 이전 task를 빠르게 망각함.
+
 ```
 L = CE(f(x), y)
 ```
 
-### 2. Elastic Weight Consolidation (EWC)
-**개념**: Fisher Information Matrix를 사용하여 이전 작업에 중요한 파라미터를 보호
+---
 
-각 작업 후:
-1. 현재 작업의 Fisher 정보(대각) 계산
-2. 중요 파라미터는 큰 Fisher 값을 가짐
-3. 새 작업 학습 시, 중요 파라미터의 변화를 제약
+### EWC — Elastic Weight Consolidation
+> Kirkpatrick et al., PNAS 2017
 
-**손실 함수**:
+각 task 완료 후 데이터로 Fisher Information Matrix (대각 근사)를 계산하고, 중요한 파라미터가 크게 변하지 않도록 정규화 항을 추가.
+
 ```
-L = CE(f(x), y) + (λ/2) Σ_i F_i * (θ_i - θ_i*)²
+L = CE(f(x), y) + (λ/2) Σ_i F_i (θ_i − θ_i*)²
 
-where:
-  F_i = Fisher 중요도
-  θ_i = 현재 파라미터
-  θ_i* = 이전 작업 최적 파라미터
-  λ = 5000 (정규화 강도)
+F_i  : Fisher 중요도 (기울기 제곱 평균) — task 완료 후 데이터로 계산
+θ_i* : 이전 task 완료 시점의 최적 파라미터
+λ    : 5000
 ```
 
-**예상**: 중간 정도의 포게팅 감소
+**주요 메서드**
+- `consolidate_task(loader)` — Fisher 계산 및 최적 파라미터 저장 (task 완료 후, 데이터 필요)
 
-### 3. Experience Replay with DER++
-**개념**: 이전 작업의 샘플을 저장하고 새 작업 학습 중 재현(replay)
+---
 
-특징:
-- 고정 크기 재현 버퍼 (200개 샘플)
-- 클래스 균형 유지 (reservoir sampling)
-- 두 가지 재현 손실:
-  1. 표준 재현: 재현 샘플 간 CE 손실
-  2. Dark Experience Replay: 현재 로짓 vs 저장된 로짓의 MSE
+### SI — Synaptic Intelligence
+> Zenke, Poole & Ganguli, ICML 2017
 
-**손실 함수**:
+EWC와 동일한 정규화 구조이지만, 중요도를 학습 중 매 step마다 온라인으로 누적. task 완료 후 데이터 재사용 없음.
+
+```
+온라인 누적 (각 gradient step):
+  ω_k += −g_k · (θ_k_new − θ_k_old)
+
+task 완료 후 (consolidation):
+  Ω_k += clamp( ω_k / (Δθ_k² + ξ),  min=0 )
+  Δθ_k = task 전체 파라미터 변화량,  ξ = 0.1 (damping)
+
+정규화 (EWC와 동일 구조):
+  L = CE(f(x), y) + (λ/2) Σ_k Ω_k (θ_k − θ_k*)²
+
+λ = 1.0,  ξ = 0.1
+```
+
+**EWC와의 차이**
+
+| | EWC | SI |
+|---|---|---|
+| 중요도 계산 | task 후 데이터 재사용 | 학습 중 온라인 누적 |
+| 추가 데이터 패스 | 필요 | 불필요 |
+| 중요도 의미 | 손실 곡률 (Fisher) | 손실 감소 기여도 |
+
+**주요 메서드**
+- `consolidate_task()` — ω → Ω 변환, 리셋 (데이터 불필요)
+
+---
+
+### LwF — Learning without Forgetting
+> Li & Hoiem, ECCV 2016 / TPAMI 2018
+
+새로운 task 학습 전에 현재 모델을 frozen 참조 모델로 저장하고, soft output을 distillation target으로 사용. 이전 task 데이터를 전혀 저장하지 않는 memory-free 방식.
+
+```
+L = CE(f(x; θ), y)  +  λ · T² · KL( softmax(f(x;θ)/T)  ‖  softmax(f(x;θ_old)/T) )
+
+θ_old : task 학습 전에 freeze된 이전 모델
+T     : temperature (높을수록 soft한 분포)
+λ = 1.0,  T = 2.0
+```
+
+**학습 순서 (pre-task 훅 존재)**
+```
+1. record_soft_labels(loader)   ← task 학습 전: 현재 모델 snapshot
+2. train_task(loader)           ← CE + KD 결합 학습
+```
+
+**주요 메서드**
+- `record_soft_labels(loader)` — task 학습 전 현재 모델을 `old_model`로 freeze
+- `distillation_loss(logits, x)` — temperature T 적용 KL divergence (T² 스케일링)
+
+---
+
+### DER++ — Dark Experience Replay++
+> Buzzega et al., NeurIPS 2020
+
+고정 크기 replay buffer에 `(x, y, logit)` 트리플을 저장하고, 새 task 학습 중 두 가지 replay 손실을 함께 사용.
+
 ```
 L = CE(f(x_new), y_new)
-    + α * MSE(f(x_replay), logits_replay)    # Dark ER
-    + β * CE(f(x_replay), y_replay)          # Standard ER
+  + α · MSE(f(x_buf), logit_buf)     ← dark experience replay
+  + β · CE(f(x_buf), y_buf)          ← standard replay
 
-where:
-  α = 0.1 (dark ER 가중치)
-  β = 0.5 (표준 ER 가중치)
+α = 0.1,  β = 0.5,  buffer_size = 200
 ```
 
-**예상**: 가장 강한 포게팅 방지
+**주요 메서드**
+- `update_buffer(loader)` — reservoir sampling으로 버퍼 업데이트
 
-## 추적되는 메트릭
+---
 
-### 1. 정확도 행렬 (Accuracy Matrix)
-```
-accuracy_matrix[i][j] = 작업 i를 학습한 후 작업 j의 정확도
-```
-- **대각선**: 각 작업을 처음 학습했을 때의 성능
-- **비대각선**: 포게팅을 보여줌 (아래쪽 값이 작을수록 포게팅 심함)
+### GEM — Gradient Episodic Memory
+> Lopez-Paz & Ranzato, NeurIPS 2017
 
-### 2. 평균 정확도 (Average Accuracy)
-각 작업 학습 후, 지금까지 본 모든 작업의 평균 정확도
-
-### 3. 가중치 드리프트 (Weight Drift)
-파라미터 변화량의 L2 노름 (각 작업 후)
-- **높은 드리프트**: 큰 파라미터 변화
-- **낮은 드리프트** (EWC/DER++): 제약된 변화
-
-### 4. 역 이전 (Backward Transfer, BWT)
-포게팅을 정량화하는 메트릭
+각 task의 episodic memory를 저장하고, 새 task 학습 시 gradient가 모든 이전 task의 memory gradient와 양의 내적을 가지도록 제약. 위반 시 QP로 projection.
 
 ```
-BWT = (1/(T-1)) * Σ_{j=0}^{T-2} (A[T-1][j] - A[j][j])
+제약 조건:  ⟨g̃, g_k⟩ ≥ 0    (모든 이전 task k에 대해)
 
-where:
-  T = 총 작업 수
-  A[i][j] = 작업 i 후 작업 j의 정확도
+Primal:  min_{g̃}  ½‖g̃ − g‖²    s.t.  G g̃ ≥ 0
+Dual:    min_{v≥0} ½ v^T(GG^T)v + (Gg)^T v
+복원:    g̃ = g + G^T v*
+
+n_memories = 256,  margin = 0.0
 ```
 
-- **BWT < 0**: 포게팅 (음수일수록 심함)
-- **BWT = 0**: 포게팅 없음
-- **BWT > 0**: 긍정적 이전 (드물음)
+**QP solver 의존성**
+- `quadprog` 설치 시: 최적 QP projection
+- 미설치 시: Gram-Schmidt projection으로 자동 fallback
 
-## 시각화
+```bash
+pip install quadprog    # 권장
+```
 
-실행 후 `continual_learning_results.png`가 생성되며, 다음을 포함합니다:
+**주요 메서드**
+- `consolidate_task(loader)` — episodic memory 저장 (task 완료 후)
 
-### 1. 정확도 행렬 히트맵 (2개 데이터셋 × 3개 방법)
-6개의 히트맵:
-- 행 = 학습한 작업
-- 열 = 평가한 작업
-- 색상 = 정확도 (초록 = 높음, 빨강 = 낮음)
+---
 
-### 2. 평균 정확도 곡선
-- X축: 작업 인덱스 (1-5)
-- Y축: 평균 정확도
-- 3개 선 (Fine-tuning / EWC / DER++)
-- MNIST와 CIFAR-10 모두 표시
+### HAT — Hard Attention to the Task
+> Serra et al., ICML 2018
 
-### 3. 가중치 드리프트
-- X축: 작업 인덱스
-- Y축: 파라미터 변화 (L2 노름)
-- 각 방법의 드리프트 패턴 비교
-- EWC가 드리프트를 제약하는 모습을 볼 수 있음
+Task별 학습 가능한 임베딩에서 sigmoid mask를 생성. Hard mask가 된 뉴런은 이후 task에서 gradient를 차단하여 "소유권"을 보존.
 
-### 4. Backward Transfer (BWT) 막대 그래프
-- X축: 방법 이름
-- Y축: BWT 점수
-- MNIST와 CIFAR-10의 그룹화된 막대
-- 음수 = 포게팅 (DER++에서 가장 작은 음수 = 포게팅 최소)
+```
+mask_t  = σ(s · e_t)           (s: 온도, e_t: task embedding)
+L = CE + λ · capacity_reg
+
+λ = 0.75,  s_max = 400
+```
+
+**주요 메서드**
+- `set_eval_task(task_id)` — 평가 시 해당 task의 hard mask 적용
+- `consolidate_task()` — 현재 task mask를 누적 mask에 병합
+
+---
+
+### Co2L — Contrastive Continual Learning
+> Cha et al., CVPR 2021
+
+Supervised Contrastive Loss로 표현을 학습하고, 이전 모델과의 Asymmetric Distillation Loss로 표현 공간이 변하지 않도록 제약.
+
+```
+L = CE(classifier(z), y)
+  + L_SupCon(proj(z))
+  + λ · L_AsymDistill(proj(z), proj_prev(z))    (task ≥ 1)
+
+λ = 1.0,  temperature = 0.1
+```
+
+**주요 메서드**
+- `consolidate_task()` — 현재 모델을 deepcopy하여 다음 task의 distillation 참조 모델로 보존
+
+---
+
+## 평가 지표
+
+### Accuracy Matrix
+```
+A[i][j] = task i 학습 완료 후 task j에서의 정확도
+```
+- 대각선 `A[t][t]`: 각 task를 처음 학습했을 때의 성능
+- 대각선 아래 값이 낮을수록 forgetting이 심함
+
+### Backward Transfer (BWT)
+```
+BWT = (1/(T−1)) Σ_{j=0}^{T−2} (A[T−1][j] − A[j][j])
+```
+- `BWT < 0`: forgetting (음수가 클수록 심함)
+- `BWT = 0`: forgetting 없음
+- `BWT > 0`: positive backward transfer
+
+### Weight Drift
+각 task 완료 후 파라미터 변화량의 L2 norm. 정규화 방법일수록 드리프트가 억제되는 경향.
+
+---
 
 ## 실행 방법
 
-### 요구사항
-```
-PyTorch >= 2.0
-torchvision
-matplotlib
-numpy
-tqdm
-```
-
 ### 설치
+
 ```bash
-pip install torch torchvision matplotlib numpy tqdm
+pip install torch torchvision numpy matplotlib tqdm
+pip install quadprog    # GEM QP projection (선택, 없으면 fallback 사용)
 ```
 
-### 실행
+### 기본 실행
+
 ```bash
+# 전체 실험 (MNIST + CIFAR-10, 8개 방법)
 python run_all.py
+
+# 특정 데이터셋만
+python run_all.py --dataset mnist
+python run_all.py --dataset cifar10
+
+# 특정 방법만
+python run_all.py --methods finetune ewc si lwf
+
+# 시각화 없이 실행
+python run_all.py --no-plot
+
+# 저장된 결과로 시각화만 생성
+python run_all.py --plot-only results.pkl
 ```
 
-또는 가상환경이 이미 설정되었다면:
-```bash
-/Users/idahyun/Desktop/cl/.venv/bin/python run_all.py
-```
+### CLI 옵션
 
-### 실행 시간
-CPU 기준: ~17-20분
-- MNIST: ~1분 (fine-tuning) + ~1.5분 (EWC) + ~1.5분 (DER++)
-- CIFAR-10: ~3분 (fine-tuning) + ~4분 (EWC) + ~4.5분 (DER++)
+| 옵션 | 기본값 | 설명 |
+|---|---|---|
+| `--dataset` | `all` | `mnist`, `cifar10`, `all` |
+| `--methods` | 전체 8개 | 실행할 방법 목록 |
+| `--epochs` | `5` | task당 에포크 수 |
+| `--learning-rate` | `0.001` | 학습률 |
+| `--device` | `auto` | `cpu`, `cuda`, `auto` |
+| `--seed` | `42` | 재현성 시드 |
+| `--output` | `results.pkl` | 결과 저장 경로 |
 
-## 결과 해석
+---
 
-### 예상되는 결과
+## 하이퍼파라미터 요약
 
-| 메트릭 | Fine-tuning | EWC | DER++ |
-|--------|------------|-----|-------|
-| 최종 평균 정확도 (MNIST) | ~50-60% | ~60-65% | ~90%+ |
-| 최종 평균 정확도 (CIFAR-10) | ~70% | ~73% | ~76%+ |
-| BWT (MNIST) | ~-0.59 | ~-0.52 | ~-0.10 |
-| BWT (CIFAR-10) | ~-0.27 | ~-0.21 | ~-0.19 |
-| 가중치 드리프트 제약 | 없음 | 중간 | 버퍼 기반 |
+| 방법 | 파라미터 | 기본값 |
+|---|---|---|
+| EWC | `ewc_lambda` | 5000 |
+| SI | `si_lambda` / `xi` | 1.0 / 0.1 |
+| LwF | `lwf_lambda` / `temperature` | 1.0 / 2.0 |
+| DER++ | `buffer_size` / `alpha` / `beta` | 200 / 0.1 / 0.5 |
+| GEM | `n_memories` / `margin` | 256 / 0.0 |
+| HAT | `hat_lambda` / `s_max` | 0.75 / 400 |
+| Co2L | `distill_lambda` / `temperature` | 1.0 / 0.1 |
 
-### 해석
+하이퍼파라미터 변경은 `train.py`의 `train_all_tasks()` 내 각 trainer 초기화 블록에서 수정.
 
-1. **Fine-tuning은 최악**: 각 새 작업 학습 시 이전 작업을 잊음
-
-2. **EWC는 개선**: Fisher 행렬로 중요 파라미터 보호
-   - 드리프트가 감소하는 경향
-   - BWT가 개선됨
-
-3. **DER++이 최고**: 재현 버퍼로 실제 데이터 유지
-   - 가장 높은 평균 정확도
-   - 가장 작은 음수 BWT (포게팅 최소)
-   - 메모리 요구사항: 고정 200개 샘플
-
-## 파일 설명
-
-### run_all.py
-- 진입점
-- 두 데이터셋에서 모든 방법 실행
-- 결과를 `results.pkl`로 저장
-- 시각화 생성 및 저장
-
-### datasets.py
-- `SplitMNIST`: Split MNIST 데이터셋
-- `SplitCIFAR10`: Split CIFAR-10 데이터셋
-- `TaskDataset`: 개별 작업 데이터 래퍼
-- `CombinedTaskDataset`: 여러 작업 평가 시 사용
-
-### models.py
-- `MNIST_MLP`: MNIST용 소규모 MLP
-- `CIFAR10_CNN`: CIFAR-10용 소규모 CNN
-- `get_parameters()`: 파라미터 스냅샷 저장
-- `compute_weight_drift()`: 파라미터 변화 계산
-
-### train.py
-- `TaskIncrementalLearner`: 메인 학습 오케스트레이터
-- `train_all_tasks()`: 순차적 작업 학습
-- BWT 계산
-
-### methods/finetune.py
-- `FinetuneTrainer`: 기준 파인튜닝
-- 표준 교차 엔트로피 손실만 사용
-
-### methods/ewc.py
-- `EWCTrainer`: Elastic Weight Consolidation
-- `compute_fisher()`: Fisher Information Matrix 계산
-- `consolidate_task()`: 작업 완료 후 Fisher 누적
-- `ewc_loss()`: EWC 정규화 항
-
-### methods/derpp.py
-- `DERppTrainer`: DER++ 학습기
-- `ReplayBuffer`: 경험 재현 버퍼
-  - `add_task_data()`: Reservoir sampling으로 버퍼 업데이트
-  - `sample()`: 재현 배치 샘플링
-- Dark ER과 표준 ER 손실 결합
-
-### evaluate.py
-- 평가 유틸리티 함수
-- 통계 계산 (대각선 정확도, final row 등)
-
-### visualize.py
-- `plot_results()`: 종합 시각화 생성
-- 4개 서브플롯 타입 작성
-
-## 고급 설정
-
-## 하이퍼파라미터 조정
-
-파라미터를 조정하려면 `run_all.py`의 `TaskIncrementalLearner` 초기화를 수정하세요:
-
-```python
-learner = TaskIncrementalLearner(
-    model_class=model_class,
-    num_tasks=num_tasks,
-    dataset=dataset,
-    device=device,
-    learning_rate=0.001,  # 학습률 조정
-    epochs=5              # 에포크 조정
-)
-```
-
-### EWC 람다 조정
-
-`train.py`에서:
-```python
-trainer = EWCTrainer(
-    model, device=device,
-    learning_rate=learning_rate, epochs=epochs,
-    ewc_lambda=5000  # 정규화 강도 (높을수록 더 강한 제약)
-)
-```
-
-### DER++ 하이퍼파라미터 조정
-
-`train.py`에서:
-```python
-trainer = DERppTrainer(
-    model, device=device,
-    learning_rate=learning_rate, epochs=epochs,
-    buffer_size=200,    # 재현 버퍼 크기
-    alpha=0.1,          # Dark ER 가중치
-    beta=0.5            # 표준 ER 가중치
-)
-```
-
-## 재현성
-
-모든 난수 시드는 `run_all.py`의 `set_seed(42)`로 설정됩니다:
-- PyTorch 난수 생성기
-- NumPy 난수 생성기
-- Python random 모듈
-- CUDA 난수 생성기 (if available)
-
-## 문제 해결
-
-### 메모리 부족
-- 배치 크기 감소 (`datasets.py`에서 `batch_size` 파라미터)
-- 에포크 수 감소 (`run_all.py`에서 `epochs` 파라미터)
-- DER++ 버퍼 크기 감소 (derpp.py에서 buffer_size)
-
-### 느린 실행
-- CPU 대신 GPU 사용 (CUDA 가능한 경우)
-- 에포크 수 감소
-- 데이터셋 크기 감소
+---
 
 ## 논문 참고
 
-- **EWC**: Kirkpatrick et al., "Overcoming catastrophic forgetting in neural networks" (PNAS 2017)
-- **DER++**: Buzzega et al., "Dark Experience for General Continual Learning" (ECCV 2020)
-
-## 라이선스
-
-이 코드는 교육 목적으로 제공됩니다.
-
-## 작성자
-
-GitHub Copilot - 연속 학습 실험 구현
+| 알고리즘 | 논문 |
+|---|---|
+| EWC | Kirkpatrick et al., "Overcoming catastrophic forgetting in neural networks", PNAS 2017 |
+| SI | Zenke, Poole & Ganguli, "Continual Learning Through Synaptic Intelligence", ICML 2017 |
+| LwF | Li & Hoiem, "Learning without Forgetting", ECCV 2016 / TPAMI 2018 |
+| DER++ | Buzzega et al., "Dark Experience for General Continual Learning: a Strong, Simple Baseline", NeurIPS 2020 |
+| GEM | Lopez-Paz & Ranzato, "Gradient Episodic Memory for Continual Learning", NeurIPS 2017 |
+| HAT | Serra et al., "Overcoming Catastrophic Forgetting with Hard Attention to the Task", ICML 2018 |
+| Co2L | Cha et al., "Co2L: Contrastive Continual Learning", CVPR 2021 |
