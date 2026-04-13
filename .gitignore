@@ -1,0 +1,6 @@
+data/
+*.pth
+*.ckpt
+logs/
+__pycache__/
+.env
