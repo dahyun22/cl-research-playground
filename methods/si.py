@@ -246,15 +246,19 @@ class SITrainer:
         """
         for name, param in self.model.named_parameters():
             # 완료된 태스크 전체 동안의 파라미터 이동량
-            delta = param.data - self._theta_start[name]
+            delta = param.data - self._theta_start[name] # Δθ = θ(태스크 종료 시점) − θ(태스크 시작 시점)
 
             # 태스크별 중요도: 이동량 크기로 ω를 정규화
             # 0 이상으로 clamp: 음수면 오히려 anti-regularisation이 됨
             task_importance = torch.clamp(
                 self._omega_running[name] / (delta ** 2 + self.xi),
-                min=0.0
+                min=0.0 # 음수가 나오면 중요도가 아니라 anti-regularisation이 되므로 0으로 clamp한다. (SI 논문에서는 이렇게 권장한다)
             )
-
+            # 분자 오메가: loss를 얼마나 줄여줬는지 (기여도)
+            # 분모 이동량 제곱: 파라미터가 얼마나 움직였나 
+            # xi: 이동량이 거의 없는 파라미터가 과도하게 중요해지는 것을 방지하는 작은 상수
+            # SI 논문에서는 0.1을 권장하지만, 데이터셋과 모델에 따라 조정할 수 있다.
+             
             # 태스크 간 누적
             if name not in self.importance_dict:
                 self.importance_dict[name] = task_importance.clone()

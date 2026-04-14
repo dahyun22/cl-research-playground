@@ -1,8 +1,8 @@
 """
-Gradient Episodic Memory (GEM) Trainer
-=======================================
-Constrains gradient updates so that loss on any previously stored episodic
-memory does not increase, preventing catastrophic forgetting.
+Gradient Episodic Memory (GEM) 학습기
+====================================
+이전에 저장된 에피소드 메모리에서의 손실이 증가하지 않도록 그래디언트
+업데이트를 제한하여 파국적 망각을 방지한다.
 """
 
 import numpy as np
@@ -19,37 +19,37 @@ except ImportError:
 
 class EpisodicMemory:
     """
-    Per-task episodic memory buffer for GEM.
+    GEM을 위한 태스크별 에피소드 메모리 버퍼.
 
-    Maintains a separate memory bank for each completed task, storing up to
-    n_memories randomly-sampled training examples.  Unlike DER++'s flat
-    reservoir buffer, GEM needs task-separated memories so that a
-    task-specific gradient can be computed and used as a constraint.
+    완료된 각 태스크마다 분리된 메모리 뱅크를 유지하며, 무작위로 샘플링한
+    학습 예제를 최대 n_memories개까지 저장한다. DER++의 평평한 reservoir
+    버퍼와 달리, GEM은 태스크별 그래디언트를 계산해 제약식에 사용해야 하므로
+    태스크가 분리된 메모리가 필요하다.
 
-    Conceptual role:
-      - After finishing task t, call add_task(t, loader) to populate M_t
-      - During training on task t+k, iterate over all stored memories to
-        obtain reference gradients that the current update must not violate
+    개념적 역할:
+      - 태스크 t가 끝난 뒤 add_task(t, loader)를 호출해 M_t를 채운다
+      - 태스크 t+k를 학습하는 동안 저장된 모든 메모리를 순회하며 현재
+        업데이트가 위반해서는 안 되는 기준 그래디언트를 얻는다
     """
 
     def __init__(self, n_memories=256):
         """
-        Args:
-            n_memories (int): Maximum number of samples to keep per task
+        매개변수:
+            n_memories (int): 태스크별로 유지할 최대 샘플 수
         """
-        self.n_memories = n_memories
-        self.memory = {}  # {task_id: (x_tensor, y_tensor)}  — stored on CPU
+        self.n_memories = n_memories # 태스크 별로 이미지와 레이블을 최대 n_memories개까지 저장하는 버퍼 크기
+        self.memory = {}  # {task_id: (x_tensor, y_tensor)}  — CPU에 저장
 
     def add_task(self, task_id, data_loader):
         """
-        Collect and store up to n_memories samples from a completed task.
+        완료된 태스크에서 최대 n_memories개의 샘플을 수집해 저장한다.
 
-        All available batches are concatenated first, then a random subset
-        of size n_memories is drawn without replacement to form M_{task_id}.
+        먼저 사용 가능한 모든 배치를 이어 붙인 뒤, 중복 없이 무작위 부분집합
+        n_memories개를 뽑아 M_{task_id}를 만든다.
 
-        Args:
-            task_id (int): Identifier for the completed task
-            data_loader: DataLoader for the completed task's training data
+        매개변수:
+            task_id (int): 완료된 태스크의 식별자
+            data_loader: 완료된 태스크의 학습 데이터용 DataLoader
         """
         all_x, all_y = [], []
 
@@ -62,45 +62,45 @@ class EpisodicMemory:
 
         n = all_x.size(0)
         mem_size = min(self.n_memories, n)
-        indices = torch.randperm(n)[:mem_size]
+        indices = torch.randperm(n)[:mem_size] # 무작위로 mem_size개 인덱스 선택 (256개)
 
-        self.memory[task_id] = (all_x[indices], all_y[indices])
+        self.memory[task_id] = (all_x[indices], all_y[indices]) # 저장
 
     def num_tasks(self):
-        """Return the number of tasks currently stored in memory."""
+        """현재 메모리에 저장된 태스크 수를 반환한다."""
         return len(self.memory)
 
 
 class GEMTrainer:
     """
-    GEM (Gradient Episodic Memory) trainer.
+    GEM (Gradient Episodic Memory) 학습기.
 
-    Conceptual approach:
-      - After learning each task, store a small episodic memory of M samples
-      - During training on a new task t, enforce gradient constraints:
+    개념적 접근:
+      - 각 태스크를 학습한 뒤 M개의 샘플로 이루어진 작은 에피소드 메모리를 저장한다
+      - 새로운 태스크 t를 학습할 때 다음 그래디언트 제약을 강제한다:
           ⟨g̃, g_k⟩ ≥ 0  for all previous tasks k
-        where g̃ is the (projected) update gradient and g_k is the gradient
-        computed on the episodic memory of task k
-      - When the constraint is violated for any k, find the closest feasible
-        gradient g̃ via Quadratic Programming (QP) and apply it instead
-      - Expected to show significantly reduced forgetting compared to
-        fine-tuning while requiring no architectural changes (unlike HAT)
+        여기서 g̃는 (투영된) 업데이트 그래디언트이고, g_k는 태스크 k의
+        에피소드 메모리에서 계산된 그래디언트다
+      - 어떤 k에서든 제약을 위반하면, 이차 계획법(QP)으로 가장 가까운
+        feasible 그래디언트 g̃를 찾아 대신 적용한다
+      - 구조 변경 없이(예: HAT과 달리) fine-tuning보다 망각을 크게 줄이는
+        효과를 기대할 수 있다
 
-    Gradient projection (QP formulation):
+    그래디언트 투영(QP 정식화):
 
       Primal:
         min_{g̃}  (1/2) ‖g̃ − g‖²
-        s.t.      G g̃ ≥ −margin      (G: memory gradient matrix, rows = g_k)
+        s.t.      G g̃ ≥ −margin      (G: 메모리 그래디언트 행렬, 각 행 = g_k)
 
-      Dual (solved with quadprog):
+      Dual (quadprog로 풂):
         min_{v ≥ 0}  (1/2) v^T (G G^T) v  +  (G g + margin)^T v
         g̃ = g + G^T v*
 
-    When quadprog is unavailable the trainer falls back to sequential
-    Gram-Schmidt projection, which is not QP-optimal but still enforces
-    the dot-product sign constraint and requires no extra dependency.
+    quadprog를 사용할 수 없으면, 학습기는 순차적인 Gram-Schmidt 투영으로
+    대체한다. 이는 QP 최적해는 아니지만 내적 부호 제약은 유지하며 추가
+    의존성이 필요 없다.
 
-    Reference:
+    참고 문헌:
       Lopez-Paz & Ranzato, "Gradient Episodic Memory for Continual Learning",
       NeurIPS 2017.
     """
@@ -108,14 +108,14 @@ class GEMTrainer:
     def __init__(self, model, device="cpu", learning_rate=0.001, epochs=5,
                  n_memories=256, margin=0.0):
         """
-        Args:
-            model: Neural network model
-            device (str): Device for training
-            learning_rate (float): Learning rate for optimizer
-            epochs (int): Number of epochs per task
-            n_memories (int): Samples stored per task in episodic memory
-            margin (float): Constraint slack ε; constraint is G g̃ ≥ −margin.
-                            GEM paper uses 0; small positive values add slack.
+        매개변수:
+            model: 신경망 모델
+            device (str): 학습에 사용할 디바이스
+            learning_rate (float): 옵티마이저 학습률
+            epochs (int): 태스크당 에폭 수
+            n_memories (int): 에피소드 메모리에 태스크별로 저장할 샘플 수
+            margin (float): 제약 여유값 ε; 제약식은 G g̃ ≥ −margin.
+                            GEM 논문은 0을 사용하며, 작은 양수는 여유를 준다.
         """
         self.model = model.to(device)
         self.device = device
@@ -127,23 +127,24 @@ class GEMTrainer:
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
 
-        # Per-task episodic memory bank
+        # 태스크별 에피소드 메모리 뱅크
         self.episodic_memory = EpisodicMemory(n_memories=n_memories)
 
-        # Number of tasks whose memories have been stored
+        # 메모리가 저장된 태스크 수
         self.n_tasks_seen = 0
 
     # ------------------------------------------------------------------
-    # Gradient vector helpers
+    # 그래디언트 벡터 유틸리티
     # ------------------------------------------------------------------
 
     def _get_gradient_vector(self):
         """
-        Flatten all parameter gradients into a single 1-D numpy array.
-        Parameters without a gradient contribute a zero block.
+        그래디언트는 파라미터마다 .grad 버퍼에 저장된다. 
+        모든 파라미터의 그래디언트를 하나의 1차원 numpy 배열로 펼친다.
+        그래디언트가 없는 파라미터는 0 블록으로 채운다.
 
-        Returns:
-            np.ndarray: Concatenated gradient vector, shape (num_params,)
+        반환값:
+            np.ndarray: 이어 붙인 그래디언트 벡터, shape (num_params,)
         """
         grads = []
         for p in self.model.parameters():
@@ -155,10 +156,10 @@ class GEMTrainer:
 
     def _set_gradient_vector(self, grad_vec):
         """
-        Write a flat numpy gradient array back into the model's .grad buffers.
+        평평한 numpy 그래디언트 배열을 모델의 .grad 버퍼에 다시 써 넣는다.
 
-        Args:
-            grad_vec (np.ndarray): Flat gradient vector of length num_params
+        매개변수:
+            grad_vec (np.ndarray): 길이가 num_params인 평탄화 그래디언트 벡터
         """
         grad_tensor = torch.from_numpy(grad_vec).float().to(self.device)
         offset = 0
@@ -171,22 +172,22 @@ class GEMTrainer:
             offset += n
 
     # ------------------------------------------------------------------
-    # Memory gradient computation
+    # 메모리 그래디언트 계산
     # ------------------------------------------------------------------
 
     def _compute_memory_gradients(self):
         """
-        Compute one gradient vector per previous task using its episodic memory.
+        이전 각 태스크의 에피소드 메모리를 사용해 태스크별 그래디언트 벡터를 계산한다.
 
-        Each memory gradient g_k = ∇_θ L(M_k; θ) is a full forward + backward
-        pass over the stored samples for task k.  The model's gradient buffers
-        are left containing the last task's memory gradient upon return
-        (the caller is expected to overwrite them via _set_gradient_vector).
+        각 메모리 그래디언트 g_k = ∇_θ L(M_k; θ)는 태스크 k에 저장된 샘플 전체에
+        대해 forward + backward를 한 번 수행해 얻는다. 반환 시점의 모델
+        그래디언트 버퍼에는 마지막 태스크의 메모리 그래디언트가 남아 있으며,
+        호출자는 _set_gradient_vector로 이를 덮어쓴다고 가정한다.
 
-        Returns:
-            np.ndarray or None: Memory gradient matrix G of shape
-                                (n_prev_tasks, num_params), or None when no
-                                previous task memory exists yet.
+        반환값:
+            np.ndarray or None: shape가 (n_prev_tasks, num_params)인 메모리
+                                그래디언트 행렬 G. 아직 이전 태스크 메모리가
+                                없으면 None.
         """
         if self.episodic_memory.num_tasks() == 0:
             return None
@@ -208,26 +209,26 @@ class GEMTrainer:
         return np.stack(memory_grads, axis=0)  # (n_prev_tasks, num_params)
 
     # ------------------------------------------------------------------
-    # QP-based projection
+    # QP 기반 투영
     # ------------------------------------------------------------------
 
     def _qp_project(self, current_grad, memory_grads):
         """
-        Project current_grad onto the feasible cone via QP (quadprog).
+        current_grad를 QP(quadprog)를 통해 feasible cone으로 투영한다.
 
-        Solves the dual:
+        다음 dual 문제를 푼다:
           min_{v ≥ 0}  (1/2) v^T (G G^T) v  +  (G g + margin)^T v
           g̃ = g + G^T v*
 
-        Falls back to Gram-Schmidt when quadprog is unavailable or the solver
-        encounters a numerical failure.
+        quadprog를 사용할 수 없거나 솔버가 수치적으로 실패하면 Gram-Schmidt
+        방식으로 대체한다.
 
-        Args:
-            current_grad (np.ndarray): Current task gradient g, shape (d,)
-            memory_grads (np.ndarray): Memory gradient matrix G, shape (K, d)
+        매개변수:
+            current_grad (np.ndarray): 현재 태스크 그래디언트 g, shape (d,)
+            memory_grads (np.ndarray): 메모리 그래디언트 행렬 G, shape (K, d)
 
-        Returns:
-            np.ndarray: Projected gradient g̃, shape (d,), dtype float32
+        반환값:
+            np.ndarray: 투영된 그래디언트 g̃, shape (d,), dtype float32
         """
         if _QUADPROG_AVAILABLE:
             return self._qp_project_quadprog(current_grad, memory_grads)
@@ -235,34 +236,34 @@ class GEMTrainer:
 
     def _qp_project_quadprog(self, current_grad, memory_grads):
         """
-        QP projection using quadprog library.
+        quadprog 라이브러리를 사용한 QP 투영.
 
-        quadprog API: solve_qp(Q, a, C, b) solves
+        quadprog API: solve_qp(Q, a, C, b)는 다음을 푼다
           min (1/2) x^T Q x − a^T x   s.t. C^T x ≥ b
 
-        Mapping from dual variables v:
-          Q = G G^T  (Gram matrix of memory gradients, regularised)
+        dual 변수 v에 대한 대응:
+          Q = G G^T  (메모리 그래디언트의 Gram 행렬, 안정화를 위해 정규화)
           a = −(G g + margin·1)
-          C = I  (v ≥ 0 constraint)
+          C = I  (v ≥ 0 제약)
           b = 0
 
-        Args:
+        매개변수:
             current_grad (np.ndarray): shape (d,)
             memory_grads (np.ndarray): shape (K, d)
 
-        Returns:
-            np.ndarray: Projected gradient, shape (d,), dtype float32
+        반환값:
+            np.ndarray: 투영된 그래디언트, shape (d,), dtype float32
         """
         n_tasks = memory_grads.shape[0]
 
-        # Gram matrix (dual coefficient matrix), regularised for stability
+        # Gram 행렬(dual 계수 행렬), 안정성을 위해 정규화
         GGT = (memory_grads @ memory_grads.T).astype(np.float64)
         GGT += 1e-6 * np.eye(n_tasks)
 
-        # Linear term: G g + margin·1  (incorporates constraint slack)
+        # 선형 항: G g + margin·1  (제약 여유값 반영)
         Gg = (memory_grads @ current_grad + self.margin).astype(np.float64)
 
-        # Non-negativity constraint on dual variables: I v ≥ 0
+        # dual 변수의 비음수 제약: I v ≥ 0
         C = np.eye(n_tasks, dtype=np.float64)
         b = np.zeros(n_tasks, dtype=np.float64)
 
@@ -270,101 +271,102 @@ class GEMTrainer:
             v = quadprog.solve_qp(GGT, -Gg, C, b)[0]
             projected = current_grad + (memory_grads.T @ v).astype(np.float32)
         except Exception:
-            # Numerical failure: gracefully fall back to Gram-Schmidt
+            # 수치적 실패 시 Gram-Schmidt 방식으로 안전하게 대체
             projected = self._gram_schmidt_project(current_grad, memory_grads)
 
         return projected.astype(np.float32)
 
     def _gram_schmidt_project(self, current_grad, memory_grads):
         """
-        Sequential Gram-Schmidt gradient projection (quadprog-free fallback).
+        순차적 Gram-Schmidt 그래디언트 투영(quadprog 없는 대체 경로).
 
-        For each violated constraint, removes the component of the gradient
-        that points against the memory gradient:
+        위반된 각 제약에 대해 메모리 그래디언트와 반대 방향을 가리키는
+        그래디언트 성분을 제거한다:
           if ⟨g, g_k⟩ < 0:  g ← g − (⟨g, g_k⟩ / ‖g_k‖²) g_k
 
-        Not QP-optimal, but guarantees ⟨g̃, g_k⟩ ≥ 0 for all k and requires
-        no external QP solver.  Multiple passes are made until convergence.
+        QP 최적해는 아니지만 모든 k에 대해 ⟨g̃, g_k⟩ ≥ 0을 보장하며,
+        외부 QP 솔버가 필요 없다. 수렴할 때까지 여러 번 반복한다.
 
-        Args:
+        매개변수:
             current_grad (np.ndarray): shape (d,)
             memory_grads (np.ndarray): shape (K, d)
 
-        Returns:
-            np.ndarray: Projected gradient, shape (d,), dtype float32
+        반환값:
+            np.ndarray: 투영된 그래디언트, shape (d,), dtype float32
         """
         g = current_grad.copy().astype(np.float64)
 
         for _ in range(memory_grads.shape[0]):
-            dots = memory_grads @ g  # (K,)
-            violated = np.where(dots < -self.margin)[0]
+            dots = memory_grads @ g  # (K,) 각 메모리 그래디언트와의 내적 계산
+            violated = np.where(dots < -self.margin)[0] # 위반된 task 인덱스 찾기
             if len(violated) == 0:
                 break
             for k in violated:
                 g_k = memory_grads[k].astype(np.float64)
                 norm_sq = np.dot(g_k, g_k)
                 if norm_sq > 1e-12:
-                    g -= (np.dot(g, g_k) / norm_sq) * g_k
+                    g -= (np.dot(g, g_k) / norm_sq) * g_k # 반대 방향 제거
 
         return g.astype(np.float32)
 
     # ------------------------------------------------------------------
-    # Gradient projection entry point
+    # 그래디언트 투영 진입점
     # ------------------------------------------------------------------
 
     def _project_gradients(self):
         """
-        Check GEM constraints and project the current gradient if violated.
+        GEM 제약을 확인하고, 위반 시 현재 그래디언트를 투영한다.
 
-        Steps:
-          1. Save current gradient g (from the just-completed backward pass)
-          2. Compute memory gradients G = {g_k} for each previous task k
-             (this overwrites model.grad buffers — handled in step 4)
-          3. Check ⟨g, g_k⟩ ≥ −margin for all k
-          4. If any constraint is violated, call the QP/GS projector and
-             write g̃ back into model.grad; otherwise restore g as-is
+        단계:
+          1. 현재 그래디언트 g를 저장한다(방금 끝난 backward pass 결과)
+          2. 이전 각 태스크 k에 대한 메모리 그래디언트 G = {g_k}를 계산한다
+             (이 과정에서 model.grad 버퍼가 덮어써지며, 4단계에서 처리한다)
+          3. 모든 k에 대해 ⟨g, g_k⟩ ≥ −margin인지 확인한다
+          4. 제약을 하나라도 위반하면 QP/GS 투영기를 호출해 g̃를 model.grad에
+             다시 쓰고, 아니면 원래 g를 그대로 복원한다
         """
-        # Step 1: capture current gradient before it gets overwritten
+        # 1단계: 덮어써지기 전에 현재 그래디언트를 보관
         current_grad = self._get_gradient_vector()
 
-        # Step 2: compute memory gradients (overwrites model.grad)
+        # 2단계: 메모리 그래디언트 계산(model.grad를 덮어씀)
         memory_grads = self._compute_memory_gradients()
 
         if memory_grads is None:
-            # No previous task memory yet — nothing to constrain
+            # 아직 이전 태스크 메모리가 없으므로 제약할 것이 없음
             self._set_gradient_vector(current_grad)
             return
 
-        # Step 3: check constraints
+        # 3단계: 제약 확인 (내적 계산 -> 방향 확인)
         dots = memory_grads @ current_grad  # (n_prev_tasks,)
 
         if (dots + self.margin >= 0).all():
-            # All constraints satisfied — restore original gradient unchanged
+            # 모든 제약을 만족하므로 원래 그래디언트를 그대로 복원
+            # 모두 같은 방향이면 그냥 진행
             self._set_gradient_vector(current_grad)
             return
 
-        # Step 4: constraint(s) violated — project and write back
+        # 4단계: 제약 위반 발생 시 투영 후 다시 기록
         projected_grad = self._qp_project(current_grad, memory_grads)
         self._set_gradient_vector(projected_grad)
 
     # ------------------------------------------------------------------
-    # Core trainer interface
+    # 핵심 학습기 인터페이스
     # ------------------------------------------------------------------
 
     def train_task(self, train_loader, verbose=False):
         """
-        Train model on a single task with GEM gradient constraints.
+        GEM 그래디언트 제약을 적용해 단일 태스크를 학습한다.
 
-        On task 0 (no episodic memory yet) the update is unconstrained.
-        From task 1 onward, each gradient is projected to satisfy
-        ⟨g̃, g_k⟩ ≥ 0 for all previously stored task memories k.
+        태스크 0에서는(아직 에피소드 메모리가 없으므로) 업데이트에 제약이 없다.
+        태스크 1부터는 이전에 저장된 모든 태스크 메모리 k에 대해
+        ⟨g̃, g_k⟩ ≥ 0을 만족하도록 각 그래디언트를 투영한다.
 
-        Args:
-            train_loader: DataLoader for current task training data
-            verbose (bool): Print per-epoch training progress
+        매개변수:
+            train_loader: 현재 태스크 학습 데이터용 DataLoader
+            verbose (bool): 에폭별 학습 진행 상황 출력 여부
 
-        Returns:
-            float: Average loss over the final epoch
+        반환값:
+            float: 마지막 에폭의 평균 손실
         """
         self.model.train()
 
@@ -379,11 +381,11 @@ class GEMTrainer:
 
                 logits = self.model(x)
                 loss = self.criterion(logits, y)
-                loss.backward()
+                loss.backward() # 그래디언트 계산 후,
 
-                # Apply GEM projection when previous task memories exist
+                # 이전 태스크 메모리가 있을 때 GEM 투영 적용
                 if self.n_tasks_seen > 0:
-                    self._project_gradients()
+                    self._project_gradients() # 업데이트 직전에 그래디언트 방향 검사, 수정 (투영)
 
                 self.optimizer.step()
 
@@ -402,27 +404,27 @@ class GEMTrainer:
 
     def consolidate_task(self, train_loader):
         """
-        Store episodic memory for the just-completed task.
+        방금 완료한 태스크의 에피소드 메모리를 저장한다.
 
-        Called after finishing training on each task.  Stores a random subset
-        of n_memories examples from the current task's training data and
-        increments the task counter so the next task's training is constrained.
+        각 태스크 학습이 끝난 뒤 호출된다. 현재 태스크의 학습 데이터에서
+        n_memories개를 무작위 부분집합으로 저장하고, 다음 태스크 학습에 제약이
+        걸리도록 태스크 카운터를 증가시킨다.
 
-        Args:
-            train_loader: DataLoader for the completed task's training data
+        매개변수:
+            train_loader: 완료된 태스크의 학습 데이터용 DataLoader
         """
-        self.episodic_memory.add_task(self.n_tasks_seen, train_loader)
-        self.n_tasks_seen += 1
+        self.episodic_memory.add_task(self.n_tasks_seen, train_loader) # 데이터 저장
+        self.n_tasks_seen += 1 
 
     def evaluate(self, test_loader):
         """
-        Evaluate model accuracy on test data.
+        테스트 데이터에서 모델 정확도를 평가한다.
 
-        Args:
-            test_loader: DataLoader for test data
+        매개변수:
+            test_loader: 테스트 데이터용 DataLoader
 
-        Returns:
-            float: Accuracy (0-1)
+        반환값:
+            float: 정확도 (0-1)
         """
         self.model.eval()
         correct = 0

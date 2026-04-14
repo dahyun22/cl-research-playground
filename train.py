@@ -103,7 +103,7 @@ class TaskIncrementalLearner:
             trainer = EWCTrainer(
                 model, device=self.device,
                 learning_rate=self.learning_rate, epochs=self.epochs,
-                ewc_lambda=5000
+                ewc_lambda=1000000
             )
         elif method_name == "derpp":
             trainer = DERppTrainer(

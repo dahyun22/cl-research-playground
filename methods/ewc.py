@@ -6,6 +6,7 @@ Protects important parameters for previous tasks using Fisher Information Matrix
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from copy import deepcopy
 
@@ -50,9 +51,8 @@ class EWCTrainer:
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         
-        # Store Fisher and optimal parameters for each task
-        self.fisher_dict = {}  # {param_name: fisher_values}
-        self.optimal_params = {}  # {param_name: optimal_values}
+        # Store (fisher_dict, optimal_params) per task for correct multi-task EWC
+        self.ewc_tasks = []  # list of (fisher_dict, optimal_params) tuples
     
     def compute_fisher(self, data_loader):
         """
@@ -71,78 +71,77 @@ class EWCTrainer:
             dict: Parameter name -> Fisher diagonal values
         """
         fisher = {}
-        
+
         for name, param in self.model.named_parameters():
             fisher[name] = torch.zeros_like(param.data)
-        
+
         self.model.eval()
-        
+        num_samples = 0
+
         for x, y, _ in data_loader:
             x, y = x.to(self.device), y.to(self.device)
-            
-            self.optimizer.zero_grad()
-            
-            logits = self.model(x)
-            loss = self.criterion(logits, y)
-            
-            # Compute gradients
-            loss.backward(retain_graph=True)
-            
-            # Fisher elements are squared gradients
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    fisher[name] += param.grad.data ** 2
-        
-        # Average over batches
-        num_batches = len(data_loader)
+
+            # Compute per-sample squared gradients (correct Fisher diagonal)
+            # F_i = E[(∂log p(y|x,θ)/∂θ_i)^2], not (E[∂log p/∂θ_i])^2
+            for i in range(x.size(0)):
+                self.model.zero_grad()
+                logit = self.model(x[i:i+1])
+                log_prob = F.log_softmax(logit, dim=1)[0, y[i]]
+                log_prob.backward()
+
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        fisher[name] += param.grad.data ** 2
+
+            num_samples += x.size(0)
+
+        # Average over all samples
         for name in fisher:
-            fisher[name] /= max(num_batches, 1)
-        
+            fisher[name] /= max(num_samples, 1)
+
         return fisher
     
     def consolidate_task(self, data_loader):
         """
         After training on a task, consolidate Fisher and optimal parameters.
-        Accumulates Fisher from all previous tasks.
-        
+        Stores a separate (Fisher, anchor) pair per task so each task's
+        penalty uses the correct anchor point.
+
         Args:
             data_loader: DataLoader for completed task
         """
         # Compute Fisher for this task
         new_fisher = self.compute_fisher(data_loader)
-        
-        # Accumulate Fisher (sum over all tasks seen so far)
-        for name, param in self.model.named_parameters():
-            if name not in self.fisher_dict:
-                self.fisher_dict[name] = new_fisher[name].clone()
-            else:
-                self.fisher_dict[name] += new_fisher[name]
-            
-            # Store current parameters as optimal for this task
-            self.optimal_params[name] = param.data.clone().detach()
+
+        # Store optimal params at this task's solution as anchor
+        optimal_params = {
+            name: param.data.clone().detach()
+            for name, param in self.model.named_parameters()
+        }
+
+        self.ewc_tasks.append((new_fisher, optimal_params))
     
     def ewc_loss(self):
         """
-        Compute EWC penalty term.
-        
-        This regularization term is added to the task loss to prevent
-        important previous parameters from changing too much.
-        
+        Compute EWC penalty term summed over all previous tasks.
+
+        Each task contributes its own F_t * (θ - θ*_t)^2 term, so the
+        anchor point is always the parameters that were optimal for *that*
+        specific task.
+
         Returns:
             torch.Tensor: Scalar EWC loss
         """
         loss = 0.0
-        
-        for name, param in self.model.named_parameters():
-            if name in self.fisher_dict:
-                # Only apply if we have Fisher values from previous tasks
-                fisher_values = self.fisher_dict[name]
-                optimal_values = self.optimal_params[name]
-                
-                # (param - optimal)^2 weighted by Fisher importance
-                diff = param - optimal_values
-                loss += (fisher_values * diff ** 2).sum()
-        
+
+        for fisher_dict, optimal_params in self.ewc_tasks:
+            for name, param in self.model.named_parameters():
+                if name in fisher_dict:
+                    fisher_values = fisher_dict[name]
+                    optimal_values = optimal_params[name]
+                    diff = param - optimal_values
+                    loss += (fisher_values * diff ** 2).sum()
+
         return (self.ewc_lambda / 2) * loss
     
     def train_task(self, train_loader, verbose=False):
@@ -171,22 +170,24 @@ class EWCTrainer:
                 task_loss = self.criterion(logits, y)
                 
                 # Add EWC regularization if we have previous tasks
-                if self.fisher_dict:
+                if self.ewc_tasks:
                     ewc_reg = self.ewc_loss()
                     total_task_loss = task_loss + ewc_reg
                 else:
+                    ewc_reg = torch.tensor(0.0)
                     total_task_loss = task_loss
-                
+
                 total_task_loss.backward()
                 self.optimizer.step()
-                
+
                 total_loss += total_task_loss.item()
                 num_batches += 1
-            
+
             avg_loss = total_loss / max(num_batches, 1)
-            
+
             if verbose:
-                print(f"  Epoch {epoch+1}/{self.epochs} - Loss: {avg_loss:.4f}")
+                print(f"  Epoch {epoch+1}/{self.epochs} - Loss: {avg_loss:.4f} "
+                      f"(task={task_loss.item():.4f}, ewc={ewc_reg.item():.4f})")
         
         return avg_loss
     
