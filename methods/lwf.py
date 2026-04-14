@@ -1,8 +1,8 @@
 """
-Learning without Forgetting (LwF) Trainer
-==========================================
-Retains knowledge of previous tasks via knowledge distillation on new task
-data — no episodic memory or previous task data is stored.
+망각 없는 학습(LwF) 트레이너
+===========================
+새로운 태스크 데이터에 대한 지식 증류를 통해 이전 태스크의 지식을 유지하며,
+에피소드 메모리나 이전 태스크 데이터는 저장하지 않는다.
 """
 
 import torch
@@ -14,35 +14,34 @@ from copy import deepcopy
 
 class LwFTrainer:
     """
-    LwF (Learning without Forgetting) trainer.
+    LwF(Learning without Forgetting) 트레이너.
 
-    Conceptual approach:
-      - Before training on a new task, snapshot the current model as a frozen
-        reference (old_model).  This captures all knowledge learned so far.
-      - During training, minimise two losses simultaneously:
-          1. Cross-entropy on hard labels  → learn the new task
-          2. KL-divergence between student and old model's softened outputs
-             → prevent forgetting of previous tasks
-      - No data from previous tasks is ever stored (memory-free).
-        The only overhead over fine-tuning is one extra frozen forward pass
-        per batch and retaining a copy of the previous model's weights.
-      - In a Task-Incremental Learning setting, the model shares a single
-        backbone across all tasks while the output head maps to per-task
-        binary class scores (0 vs 1).  The distillation loss is applied on
-        this shared head, preventing the backbone from drifting away from
-        representations useful for old tasks.
+    개념적 접근 방식:
+      - 새로운 태스크를 학습하기 전에 현재 모델을 고정된 기준 모델
+        (old_model)로 스냅샷한다. 이 모델은 지금까지 학습한 모든 지식을 담고 있다.
+      - 학습 중에는 두 개의 손실을 동시에 최소화한다:
+          1. 하드 라벨에 대한 교차 엔트로피  → 새로운 태스크 학습
+          2. 학생 모델과 old_model의 소프트 출력 사이의 KL divergence
+             → 이전 태스크 망각 방지
+      - 이전 태스크의 데이터는 전혀 저장하지 않는다(메모리 프리).
+        파인튜닝 대비 추가 비용은 배치마다 한 번의 고정된 forward pass와
+        이전 모델 가중치 사본을 유지하는 것뿐이다.
+      - Task-Incremental Learning 설정에서는 모델이 모든 태스크에 대해 하나의
+        백본을 공유하고, 출력 헤드는 태스크별 이진 클래스 점수(0 대 1)로 매핑된다.
+        지식 증류 손실은 이 공유 헤드에 적용되며, 이를 통해 백본이 이전 태스크에
+        유용한 표현에서 멀어지지 않도록 한다.
 
-    Key equations:
+    핵심 수식:
       L_task     = CE(f(x; θ), y)
       L_distill  = T² · KL( softmax(f(x; θ)/T)  ‖  softmax(f(x; θ_old)/T) )
       L_total    = L_task + λ · L_distill
 
-      where:
-        θ_old = model weights frozen before training on current task
-        T     = temperature  (higher → softer distribution → richer signal)
-        λ     = distillation weight
+      여기서:
+        θ_old = 현재 태스크 학습 전에 고정된 모델 가중치
+        T     = temperature  (클수록 더 부드러운 분포 → 더 풍부한 신호)
+        λ     = distillation 가중치
 
-    Reference:
+    참고 문헌:
       Li & Hoiem, "Learning without Forgetting", ECCV 2016 / TPAMI 2018.
     """
 
@@ -50,14 +49,14 @@ class LwFTrainer:
                  lwf_lambda=1.0, temperature=2.0):
         """
         Args:
-            model: Neural network model
-            device (str): Device for training
-            learning_rate (float): Learning rate for optimizer
-            epochs (int): Number of epochs per task
-            lwf_lambda (float): Weight for knowledge distillation loss (λ)
-            temperature (float): Softmax temperature for distillation (T ≥ 1).
-                                 Higher values produce softer targets and expose
-                                 more inter-class relationship information.
+            model: 신경망 모델
+            device (str): 학습에 사용할 장치
+            learning_rate (float): 옵티마이저의 학습률
+            epochs (int): 태스크당 epoch 수
+            lwf_lambda (float): 지식 증류 손실의 가중치 (λ)
+            temperature (float): 증류에 사용할 softmax temperature (T ≥ 1).
+                                 값이 클수록 타깃 분포가 더 부드러워지며,
+                                 클래스 간 관계 정보가 더 잘 드러난다.
         """
         self.model = model.to(device)
         self.device = device
@@ -69,83 +68,82 @@ class LwFTrainer:
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
 
-        # Frozen reference model from the previous task.
-        # None until record_soft_labels() is called for the first time.
+        # 이전 태스크의 정보를 담은 고정 기준 모델.
+        # record_soft_labels()가 처음 호출되기 전까지는 None이다.
         self.old_model = None
 
     def record_soft_labels(self, train_loader):
         """
-        Snapshot the current model before training on a new task.
+        새로운 태스크를 학습하기 전에 현재 모델을 스냅샷한다.
 
-        In the original LwF paper, "responses" of the old network on new task
-        data are pre-computed and stored as fixed distillation targets.  This
-        implementation achieves the same effect by freezing the current model
-        as old_model and computing soft targets on-the-fly during training.
-        The two approaches are mathematically equivalent because old_model
-        never changes within a task.
+        원본 LwF 논문에서는 새로운 태스크 데이터에 대한 이전 네트워크의 "응답"을
+        미리 계산해 고정된 증류 타깃으로 저장한다. 이 구현은 현재 모델을
+        old_model로 고정하고 학습 중에 soft target을 즉석에서 계산함으로써
+        같은 효과를 낸다. old_model은 태스크 내에서 변하지 않으므로 두 방식은
+        수학적으로 동등하다.
 
-        Must be called in train.py immediately before train_task() for each
-        task so that old_model reflects weights trained on all prior tasks
-        but NOT yet on the current one.
+        각 태스크마다 train.py에서 train_task() 바로 직전에 호출되어야 하며,
+        이렇게 해야 old_model이 현재 태스크는 아직 학습하지 않았지만 이전
+        모든 태스크는 반영한 가중치를 가지게 된다.
 
         Args:
-            train_loader: DataLoader for the upcoming task's training data.
-                          Accepted for API symmetry and potential pre-caching
-                          extensions; not consumed in the base implementation.
+            train_loader: 다음 태스크의 학습 데이터에 대한 DataLoader.
+                          API 일관성과 향후 pre-caching 확장을 위해 받지만,
+                          기본 구현에서는 사용하지 않는다.
         """
-        self.old_model = deepcopy(self.model)
-        self.old_model.eval()
+        self.old_model = deepcopy(self.model) # 현재 모델 복사
+        self.old_model.eval() # 평가 모드로 고정
         for param in self.old_model.parameters():
-            param.requires_grad_(False)
+            param.requires_grad_(False) # 그래디언트 업데이트 방지, 학습 X
 
     def distillation_loss(self, student_logits, x):
         """
-        Knowledge distillation loss between current model and old model.
+        현재 모델과 old_model 사이의 지식 증류 손실.
 
-        Temperature T controls the softness of both distributions:
-          - T = 1  : standard softmax, peaks sharply at the argmax class
-          - T > 1  : softer distribution, reveals the model's confidence
-                     ordering over all classes (dark knowledge)
+        Temperature T는 두 분포의 부드러움을 조절한다:
+          - T = 1  : 일반적인 softmax, argmax 클래스에 뾰족하게 집중됨
+          - T > 1  : 더 부드러운 분포가 되어 모델이 모든 클래스에 대해 가지는
+                     신뢰도 순서를 드러냄(dark knowledge)
 
-        Multiplying by T² compensates for the magnitude reduction in gradients
-        caused by dividing logits by T before the softmax, keeping the
-        distillation term at a comparable scale to the cross-entropy term.
+        T²를 곱하는 이유는 softmax 전에 logits를 T로 나누면서 줄어든 gradient
+        크기를 보정해, 증류 항이 교차 엔트로피 항과 비슷한 스케일을 유지하도록
+        하기 위해서다.
         (Hinton et al., "Distilling the Knowledge in a Neural Network", 2015)
 
         Args:
-            student_logits (torch.Tensor): Current model's logits, shape (B, C)
-            x (torch.Tensor): Input batch on device, used to query old_model
+            student_logits (torch.Tensor): 현재 모델의 logits, shape (B, C)
+            x (torch.Tensor): device 위의 입력 배치, old_model 조회에 사용됨
 
         Returns:
-            torch.Tensor: Scalar KL divergence distillation loss, scaled by T²
+            torch.Tensor: T²로 스케일된 스칼라 KL divergence 증류 손실
         """
         T = self.temperature
 
-        with torch.no_grad():
+        with torch.no_grad(): # old_model의 출력은 고정된 타깃이므로 그래디언트 계산 불필요
             teacher_logits = self.old_model(x)
 
         student_log_soft = F.log_softmax(student_logits / T, dim=1)
         teacher_soft = F.softmax(teacher_logits / T, dim=1)
 
-        # KL(teacher ‖ student); batchmean normalises by batch size
+        # KL(teacher ‖ student); batchmean은 배치 크기로 정규화한다.
         kl = F.kl_div(student_log_soft, teacher_soft, reduction="batchmean")
         return kl * (T ** 2)
 
     def train_task(self, train_loader, verbose=False):
         """
-        Train model on a single task with LwF distillation.
+        LwF 증류를 사용해 단일 태스크에서 모델을 학습한다.
 
-        On the first task (old_model is None) only cross-entropy is used.
-        From the second task onward, the total loss combines cross-entropy
-        on new-task hard labels with knowledge distillation from the frozen
-        old model, preventing catastrophic forgetting without storing any data.
+        첫 번째 태스크(old_model is None)에서는 교차 엔트로피만 사용한다.
+        두 번째 태스크부터는 새로운 태스크의 하드 라벨에 대한 교차 엔트로피와
+        고정된 old_model로부터의 지식 증류를 함께 사용해, 데이터를 저장하지
+        않고도 catastrophic forgetting을 줄인다.
 
         Args:
-            train_loader: DataLoader for current task training data
-            verbose (bool): Print per-epoch training progress
+            train_loader: 현재 태스크 학습 데이터에 대한 DataLoader
+            verbose (bool): epoch별 학습 진행 상황 출력 여부
 
         Returns:
-            float: Average loss over the final epoch
+            float: 마지막 epoch의 평균 손실
         """
         self.model.train()
 
@@ -159,12 +157,13 @@ class LwFTrainer:
                 self.optimizer.zero_grad()
 
                 logits = self.model(x)
+                # LwF 손실 = CE(새로운 태스크) + λ * KL(현재 모델 ‖ old_model)
                 ce_loss = self.criterion(logits, y)
 
-                if self.old_model is not None:
-                    kd_loss = self.distillation_loss(logits, x)
-                    loss = ce_loss + self.lwf_lambda * kd_loss
-                else:
+                if self.old_model is not None: 
+                    kd_loss = self.distillation_loss(logits, x) # 증류 손실
+                    loss = ce_loss + self.lwf_lambda * kd_loss # lwf_lambda로 가중치 조절
+                else: # if 0 Task, 증류 손실이 없음.
                     loss = ce_loss
 
                 loss.backward()
@@ -182,13 +181,13 @@ class LwFTrainer:
 
     def evaluate(self, test_loader):
         """
-        Evaluate model accuracy on test data.
+        테스트 데이터에서 모델 정확도를 평가한다.
 
         Args:
-            test_loader: DataLoader for test data
+            test_loader: 테스트 데이터에 대한 DataLoader
 
         Returns:
-            float: Accuracy (0-1)
+            float: 정확도 (0-1)
         """
         self.model.eval()
         correct = 0
