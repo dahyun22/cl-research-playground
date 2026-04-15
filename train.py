@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from methods.finetune import FinetuneTrainer
 from methods.ewc import EWCTrainer
+from methods.ewc_separate_head import EWCSeparateHeadTrainer
 from methods.derpp import DERppTrainer
 from methods.hat import HATTrainer
 from methods.co2l import Co2LTrainer
@@ -72,7 +73,7 @@ class TaskIncrementalLearner:
         Returns:
             dict: Results containing accuracy_matrix, weight_drift, avg_accuracy, bwt
         """
-        assert method_name in ["finetune", "ewc", "derpp", "hat", "co2l", "gem", "lwf", "si"]
+        assert method_name in ["finetune", "ewc", "ewc_sh", "derpp", "hat", "co2l", "gem", "lwf", "si"]
         
         # Initialize results storage
         results = {
@@ -104,6 +105,12 @@ class TaskIncrementalLearner:
                 model, device=self.device,
                 learning_rate=self.learning_rate, epochs=self.epochs,
                 ewc_lambda=1000000
+            )
+        elif method_name == "ewc_sh":
+            trainer = EWCSeparateHeadTrainer(
+                model, device=self.device,
+                learning_rate=self.learning_rate, epochs=self.epochs,
+                ewc_lambda=5000, num_tasks=self.num_tasks
             )
         elif method_name == "derpp":
             trainer = DERppTrainer(
@@ -198,7 +205,7 @@ class TaskIncrementalLearner:
             prev_params = model.get_parameters()
             
             # Method-specific post-training steps
-            if method_name == "ewc":
+            if method_name in ("ewc", "ewc_sh"):
                 # Consolidate Fisher for this task
                 if verbose:
                     print(f"  Computing Fisher Information...")

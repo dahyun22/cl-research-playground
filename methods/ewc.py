@@ -83,10 +83,21 @@ class EWCTrainer:
 
             # Compute per-sample squared gradients (correct Fisher diagonal)
             # F_i = E[(∂log p(y|x,θ)/∂θ_i)^2], not (E[∂log p/∂θ_i])^2
+            #
+            # We sample y ~ p(y|x, θ) instead of using the true label.
+            # This computes the *true* Fisher (expectation under the model's
+            # own distribution), rather than the empirical Fisher (expectation
+            # under the data distribution).  On easy tasks the model becomes
+            # very confident (p ≈ 0.999), so gradients w.r.t. the true label
+            # collapse to near-zero at convergence, making the empirical Fisher
+            # useless as an importance measure.  Sampling from the model keeps
+            # gradient magnitudes meaningful regardless of confidence level.
             for i in range(x.size(0)):
                 self.model.zero_grad()
                 logit = self.model(x[i:i+1])
-                log_prob = F.log_softmax(logit, dim=1)[0, y[i]]
+                prob = F.softmax(logit, dim=1)
+                sampled_y = torch.multinomial(prob[0], num_samples=1).squeeze()
+                log_prob = F.log_softmax(logit, dim=1)[0, sampled_y]
                 log_prob.backward()
 
                 for name, param in self.model.named_parameters():
